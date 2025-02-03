@@ -7,6 +7,7 @@
 #include "azure_filesystem.hpp"
 #include <azure/storage/blobs/blob_client.hpp>
 #include <azure/storage/blobs/blob_service_client.hpp>
+#include <azure/storage/blobs/block_blob_client.hpp>
 #include <string>
 
 namespace duckdb {
@@ -26,20 +27,29 @@ class AzureBlobStorageFileSystem;
 class AzureBlobStorageFileHandle : public AzureFileHandle {
 public:
 	AzureBlobStorageFileHandle(AzureBlobStorageFileSystem &fs, string path, FileOpenFlags flags,
-	                           const AzureReadOptions &read_options, Azure::Storage::Blobs::BlobClient blob_client);
+	                           const AzureReadOptions &read_options, Azure::Storage::Blobs::BlockBlobClient blob_client);
 	~AzureBlobStorageFileHandle() override = default;
 
 public:
-	Azure::Storage::Blobs::BlobClient blob_client;
+	Azure::Storage::Blobs::BlockBlobClient blob_client;
 };
 
 class AzureBlobStorageFileSystem : public AzureStorageFileSystem {
 public:
+	explicit AzureBlobStorageFileSystem(BufferManager &buffer_manager) : AzureStorageFileSystem(buffer_manager) {
+	}
+
 	vector<string> Glob(const string &path, FileOpener *opener = nullptr) override;
 
 	// FS methods
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 	bool CanHandleFile(const string &fpath) override;
+
+	// directories effectively always exist in blob storage
+	bool DirectoryExists(const string &directory, optional_ptr<FileOpener> opener = nullptr) override {
+		return true;
+	}
+
 	string GetName() const override {
 		return "AzureBlobStorageFileSystem";
 	}

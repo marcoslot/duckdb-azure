@@ -8,9 +8,11 @@
 #include "azure_http_state.hpp"
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/blob.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
-#include "duckdb/function/scalar/string_common.hpp"
+// TODO: change back to string_common for v1.2.0
+#include "duckdb/function/scalar/string_functions.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension_util.hpp"
 #include "duckdb/main/client_data.hpp"
@@ -18,9 +20,12 @@
 #include <azure/storage/blobs.hpp>
 #include <chrono>
 #include <cstdlib>
+#include <iostream>
+#include <iomanip>
 #include <memory>
 #include <string>
 #include <utility>
+#include <thread>
 
 namespace duckdb {
 
@@ -47,7 +52,9 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 			}
 			return false;
 		}
-		if (!Glob(key->data(), key->length(), pattern->data(), pattern->length())) {
+		// TODO: change back for v1.2.0
+		//if (!Glob(key->data(), key->length(), pattern->data(), pattern->length())) {
+		if (!LikeFun::Glob(key->data(), key->length(), pattern->data(), pattern->length())) {
 			return false;
 		}
 		key++;
@@ -70,7 +77,7 @@ AzureBlobContextState::GetBlobContainerClient(const std::string &blobContainerNa
 //////// AzureBlobStorageFileHandle ////////
 AzureBlobStorageFileHandle::AzureBlobStorageFileHandle(AzureBlobStorageFileSystem &fs, string path, FileOpenFlags flags,
                                                        const AzureReadOptions &read_options,
-                                                       Azure::Storage::Blobs::BlobClient blob_client)
+                                                       Azure::Storage::Blobs::BlockBlobClient blob_client)
     : AzureFileHandle(fs, std::move(path), flags, read_options), blob_client(std::move(blob_client)) {
 }
 
@@ -92,6 +99,14 @@ unique_ptr<AzureFileHandle> AzureBlobStorageFileSystem::CreateHandle(const strin
 	                                                    std::move(blob_client));
 	if (!handle->PostConstruct()) {
 		return nullptr;
+	}
+
+	if (flags.OpenForWriting()) {
+		auto azure_recommended_part_size = 8*1024*1024;
+
+		// Round part size up to multiple of Storage::DEFAULT_BLOCK_SIZE
+		handle->part_size = ((azure_recommended_part_size + Storage::DEFAULT_BLOCK_SIZE - 1) / Storage::DEFAULT_BLOCK_SIZE) *
+							Storage::DEFAULT_BLOCK_SIZE;
 	}
 	return std::move(handle);
 }
@@ -213,5 +228,76 @@ shared_ptr<AzureContextState> AzureBlobStorageFileSystem::CreateStorageContext(o
 	return make_shared_ptr<AzureBlobContextState>(ConnectToBlobStorageAccount(opener, path, parsed_url),
 	                                              azure_read_options);
 }
+
+
+/*
+ * Base64Encode base64 encodes the input string.
+ */
+static string
+Base64Encode(string input_string)
+{
+	idx_t base64_length = Blob::ToBase64Size(input_string);
+	unique_ptr<char[]> buffer(new char [base64_length + 1]);
+
+	string_t duckdb_string(input_string);
+	Blob::ToBase64(duckdb_string, buffer.get());
+	buffer[base64_length] = '\0';
+
+	return string(buffer.get());
+}
+
+
+void AzureStorageFileSystem::UploadBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) {
+	auto &afh = file_handle.Cast<AzureBlobStorageFileHandle>();
+    auto block_data = Azure::Core::IO::MemoryBodyStream((const uint8_t*)write_buffer->Ptr(), write_buffer->idx);
+
+    std::ostringstream oss;
+    oss << std::setw(6) << std::setfill('0') << (write_buffer->part_no + 1);  // e.g., "000001"
+
+	string block_id_base64_string = Base64Encode(oss.str());
+
+	try {
+		afh.blob_client.StageBlock(block_id_base64_string, block_data);
+	} catch (std::exception &e) {
+		// Ensure only one thread sets the exception
+		bool f = false;
+		auto exchanged = afh.uploader_has_error.compare_exchange_strong(f, true);
+		if (exchanged) {
+			afh.upload_exception = std::current_exception();
+		}
+
+		NotifyUploadsInProgress(file_handle);
+		return;
+	}
+
+	{
+		unique_lock<mutex> lck(file_handle.block_ids_lock);
+		file_handle.block_ids.push_back(oss.str());
+	}
+
+	file_handle.parts_uploaded++;
+
+	// Free up space for another thread to acquire an AzureWriteBuffer
+	write_buffer.reset();
+
+	NotifyUploadsInProgress(file_handle);
+}
+
+
+void AzureStorageFileSystem::FinalizeMultipartUpload(AzureFileHandle &file_handle) {
+	auto &afh = file_handle.Cast<AzureBlobStorageFileHandle>();
+
+	std::sort(afh.block_ids.begin(), afh.block_ids.end());
+
+	vector<string> base64_block_ids;
+
+	for (auto &block_id: afh.block_ids)
+		base64_block_ids.push_back(Base64Encode(block_id));
+
+    afh.blob_client.CommitBlockList(base64_block_ids);
+
+	file_handle.upload_finalized = true;
+}
+
 
 } // namespace duckdb

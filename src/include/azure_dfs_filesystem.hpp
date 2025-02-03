@@ -38,6 +38,9 @@ public:
 
 class AzureDfsStorageFileSystem : public AzureStorageFileSystem {
 public:
+	explicit AzureDfsStorageFileSystem(BufferManager &buffer_manager) : AzureStorageFileSystem(buffer_manager) {
+	}
+
 	vector<string> Glob(const string &path, FileOpener *opener = nullptr) override;
 
 	bool CanHandleFile(const string &fpath) override;

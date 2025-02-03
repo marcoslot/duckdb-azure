@@ -10,8 +10,8 @@ namespace duckdb {
 static void LoadInternal(DatabaseInstance &instance) {
 	// Load filesystem
 	auto &fs = instance.GetFileSystem();
-	fs.RegisterSubSystem(make_uniq<AzureBlobStorageFileSystem>());
-	fs.RegisterSubSystem(make_uniq<AzureDfsStorageFileSystem>());
+	fs.RegisterSubSystem(make_uniq<AzureBlobStorageFileSystem>(BufferManager::GetBufferManager(instance)));
+	fs.RegisterSubSystem(make_uniq<AzureDfsStorageFileSystem>(BufferManager::GetBufferManager(instance)));
 
 	// Load Secret functions
 	CreateAzureSecretFunctions::Register(instance);
